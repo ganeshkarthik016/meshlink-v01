@@ -18,6 +18,7 @@ INITIAL_TTL = 5        # a packet sent with TTL n reaches n hops
 
 # --- Limits ---------------------------------------------------------------
 MAX_CHAT_TEXT = 1024       # bytes of chat text
+MAX_NICKNAME_BYTES = 32
 MAX_PAYLOAD_SIZE = 2048    # largest encrypted payload in a flooded packet
 MAX_FILE_NAME_BYTES = 100
 MAX_FILE_SIZE = 100 * 1024 * 1024   # 100 MiB
