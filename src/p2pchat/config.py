@@ -11,6 +11,7 @@ PROTOCOL_VERSION = 1
 MESSAGE_ID_SIZE = 16   # random ID, used to detect duplicates
 SENDER_ID_SIZE = 8     # node ID of whoever created the packet
 NONCE_SIZE = 12        # random value needed by ChaCha20-Poly1305
+HANDSHAKE_NONCE_SIZE = 16   # fresh random value each side sends in the handshake
 
 # --- Flooding -------------------------------------------------------------
 INITIAL_TTL = 5        # a packet sent with TTL n reaches n hops
@@ -21,6 +22,7 @@ MAX_PAYLOAD_SIZE = 2048    # largest encrypted payload in a flooded packet
 MAX_FILE_NAME_BYTES = 100
 MAX_FILE_SIZE = 100 * 1024 * 1024   # 100 MiB
 CHUNK_SIZE = 64 * 1024              # 64 KiB per file chunk
+MAX_FRAME_SIZE = CHUNK_SIZE + 1024  # biggest frame we accept on any TCP link
 
 # --- Peers ----------------------------------------------------------------
 PEER_TARGET = 3        # a joining node connects until it has this many peers
