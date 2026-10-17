@@ -13,12 +13,14 @@ never while sending or receiving on a socket.
 
 import logging
 import os
+import random
 import socket
 import threading
 
 from p2pchat import config
 from p2pchat.chat import ChatError, decode_chat, encode_chat
 from p2pchat.crypto import CryptoError, decrypt_packet, encrypt_packet
+from p2pchat.discovery import Discovery
 from p2pchat.framing import FrameError
 from p2pchat.packet import PacketError, PacketType, new_message_id
 from p2pchat.peer import ConnType, HandshakeError, Peer, Role
@@ -34,9 +36,12 @@ def new_node_id() -> bytes:
 
 class Node:
     def __init__(self, node_id, handshake_key, message_key, nickname, on_chat,
-                 host="0.0.0.0", port=config.MESH_PORT):
+                 host="0.0.0.0", port=config.MESH_PORT, room_id=None, discovery_port=None):
         """on_chat(sender_id, nickname, text) is called, from a receiver thread,
-        for every new chat message from another node."""
+        for every new chat message from another node.
+
+        Discovery is on only if both room_id and discovery_port are given
+        (discovery_port=0 means "any free UDP port")."""
         self.node_id = node_id
         self.nickname = nickname
         self.port = port   # becomes the real port after start() (useful with port=0)
@@ -49,6 +54,9 @@ class Node:
         self._seen = SeenCache(config.SEEN_MAX_ENTRIES, config.SEEN_EXPIRY_SECONDS)
         self._server = None
         self._running = False
+        self._room_id = room_id
+        self._discovery_port = discovery_port
+        self._discovery = None
 
     # --- starting and stopping -------------------------------------------------
 
@@ -58,11 +66,27 @@ class Node:
         self._server.bind((self._host, self.port))
         self._server.listen()
         self.port = self._server.getsockname()[1]
+        if self._room_id is not None and self._discovery_port is not None:
+            discovery = Discovery(
+                self._room_id,
+                self.node_id,
+                tcp_port=lambda: self.port,
+                can_accept=lambda: self.peer_count() < config.PEER_MAX,
+                port=self._discovery_port,
+            )
+            try:
+                discovery.start()
+            except OSError:
+                self._server.close()
+                raise
+            self._discovery = discovery
         self._running = True
         threading.Thread(target=self._accept_loop, daemon=True).start()
 
     def stop(self) -> None:
         self._running = False
+        if self._discovery is not None:
+            self._discovery.stop()
         if self._server is not None:
             try:
                 self._server.shutdown(socket.SHUT_RDWR)   # wakes up accept()
@@ -71,6 +95,11 @@ class Node:
             self._server.close()
         for peer in self._peer_list():
             peer.close()
+
+    @property
+    def discovery_port(self):
+        """The UDP port we listen on for discovery, or None if discovery is off."""
+        return self._discovery.port if self._discovery is not None else None
 
     # --- the peer table ---------------------------------------------------------
 
@@ -143,6 +172,31 @@ class Node:
             return False
         threading.Thread(target=self._receive_loop, args=(peer,), daemon=True).start()
         return True
+
+    def find_peers(self, targets=None) -> tuple:
+        """Look for other nodes in the room and connect until we have PEER_TARGET peers.
+
+        Returns (nodes that answered, new links made). Nodes that answer but fail
+        the handshake (wrong password) or cannot be reached are skipped.
+        """
+        if self._discovery is None:
+            return 0, 0
+        candidates = self._discovery.search(targets=targets)
+        random.shuffle(candidates)   # so everyone does not pile onto the same few nodes
+        connected = 0
+        for candidate in candidates:
+            if self.peer_count() >= config.PEER_TARGET:
+                break
+            with self._lock:
+                already_linked = candidate.node_id in self._peers
+            if already_linked:
+                continue
+            try:
+                if self.connect(candidate.host, candidate.port):
+                    connected += 1
+            except (HandshakeError, OSError) as error:
+                log.info("skipping %s:%s: %s", candidate.host, candidate.port, error)
+        return len(candidates), connected
 
     def _accept_loop(self) -> None:
         while self._running:

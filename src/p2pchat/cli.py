@@ -30,8 +30,9 @@ PROMPT = "> "
 
 HELP = """\
 /create <room>         start a new room (asks for a password twice)
-/join <room>           join a room (asks for the password)
-/connect <ip[:port]>   connect to another node
+/join <room>           join a room: looks for its nodes and connects (asks for the password)
+/find                  look for nodes in the room again
+/connect <ip[:port]>   connect to a node by address
 /peers                 list connected peers
 /nick <name>           change your nickname
 /help                  show this
@@ -115,10 +116,13 @@ class Terminal:
 
 class Cli:
     def __init__(self, nickname, host="0.0.0.0", port=config.MESH_PORT,
-                 out=print, ask_password=getpass.getpass):
+                 out=print, ask_password=getpass.getpass,
+                 discovery_port=None, discovery_targets=None):
         self.nickname = nickname
         self.host = host
         self.port = port
+        self.discovery_port = discovery_port        # None = discovery off
+        self.discovery_targets = discovery_targets  # None = broadcast. Tests set this
         self.out = out                    # a function that shows one line
         self._ask_password = ask_password
         self.node = None
@@ -126,6 +130,7 @@ class Cli:
             "help": self._cmd_help,
             "create": self._cmd_create,
             "join": self._cmd_join,
+            "find": self._cmd_find,
             "connect": self._cmd_connect,
             "peers": self._cmd_peers,
             "nick": self._cmd_nick,
@@ -180,7 +185,26 @@ class Cli:
 
     def _cmd_join(self, argument):
         if self._enter_room(argument, confirm=False):
-            self.out("automatic discovery is not built yet: ask someone in the room for their address and use /connect")
+            self._search()
+
+    def _cmd_find(self, argument):
+        if self.node is None:
+            self.out("join or create a room first")
+            return
+        self._search()
+
+    def _search(self) -> None:
+        if self.node.discovery_port is None:
+            self.out("discovery is off: use /connect ip:port")
+            return
+        self.out("looking for nodes in this room ...")
+        found, connected = self.node.find_peers(targets=self.discovery_targets)
+        if found == 0:
+            self.out("nobody answered. You may be the first one here, or this network blocks broadcast. "
+                     "Others can find you with /join, or use /connect ip:port")
+        else:
+            self.out(f"{found} node(s) answered, {connected} new connection(s). "
+                     f"You now have {self.node.peer_count()} peer(s)")
 
     def _enter_room(self, room_id: str, confirm: bool) -> bool:
         """Derive the keys, start listening. Returns True if the room is ready."""
@@ -200,11 +224,12 @@ class Cli:
             self.out(str(error))
             return False
         node = Node(new_node_id(), handshake_key, message_key, self.nickname,
-                    self._on_chat, self.host, self.port)
+                    self._on_chat, self.host, self.port,
+                    room_id=room_id, discovery_port=self.discovery_port)
         try:
             node.start()
         except OSError as error:
-            self.out(f"cannot listen on port {self.port}: {error}. Try another one with --port")
+            self.out(f"cannot start listening: {error}. Try another --port or --discovery-port")
             return False
         self.node = node
         self.out(f"room '{room_id}' ready. Others can connect with:  /connect {local_ip()}:{node.port}")
@@ -289,6 +314,8 @@ def main(argv=None) -> int:
     parser.add_argument("--nick", default=default_nickname(), help="your nickname")
     parser.add_argument("--port", type=int, default=config.MESH_PORT,
                         help="TCP port to listen on (change it to run two nodes on one machine)")
+    parser.add_argument("--discovery-port", type=int, default=config.DISCOVERY_PORT,
+                        help="UDP port used to find other nodes (everyone in the room must use the same one)")
     parser.add_argument("--host", default="0.0.0.0", help="address to listen on")
     parser.add_argument("--log", default="p2pchat.log", help="log file (the terminal stays clean)")
     parser.add_argument("--debug", action="store_true", help="log every detail")
@@ -305,6 +332,7 @@ def main(argv=None) -> int:
     )
 
     terminal = Terminal()
-    cli = Cli(nickname, host=args.host, port=args.port, out=terminal.print)
+    cli = Cli(nickname, host=args.host, port=args.port, out=terminal.print,
+              discovery_port=args.discovery_port)
     cli.run(terminal)
     return 0

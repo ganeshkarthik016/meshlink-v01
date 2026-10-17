@@ -46,5 +46,9 @@ SCRYPT_MAXMEM = 64 * 1024 * 1024   # hashlib.scrypt raises an error without this
 
 # --- Ports (change if they clash with something on your machine) ----------
 DISCOVERY_PORT = 50001   # UDP
+# Where a discovery request is sent. 255.255.255.255 reaches the local network.
+# 127.255.255.255 reaches other nodes on this same machine (handy for testing).
+BROADCAST_TARGETS = ("255.255.255.255", "127.255.255.255")
+DISCOVERY_WAIT = 2.0     # seconds to collect replies after sending a request
 MESH_PORT = 50002        # TCP, chat links between peers
 FILE_PORT = 50003        # TCP, file downloads
