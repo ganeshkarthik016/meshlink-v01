@@ -23,6 +23,9 @@ MAX_PAYLOAD_SIZE = 2048    # largest encrypted payload in a flooded packet
 MAX_FILE_NAME_BYTES = 100
 MAX_FILE_SIZE = 100 * 1024 * 1024   # 100 MiB
 CHUNK_SIZE = 64 * 1024              # 64 KiB per file chunk
+FILE_TABLE_MAX = 500                # most announced files a node remembers
+FILE_MAX_CONNECTIONS = 8            # most simultaneous downloads we serve
+DOWNLOAD_DIR = "downloads"          # where finished and partial downloads go
 MAX_FRAME_SIZE = CHUNK_SIZE + 1024  # biggest frame we accept on any TCP link
 
 # --- Peers ----------------------------------------------------------------

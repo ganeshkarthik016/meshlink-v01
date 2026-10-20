@@ -21,10 +21,12 @@ from p2pchat import config
 from p2pchat.chat import ChatError, decode_chat, encode_chat
 from p2pchat.crypto import CryptoError, decrypt_packet, encrypt_packet
 from p2pchat.discovery import Discovery
+from p2pchat.files import FileError, decode_announce, encode_announce
 from p2pchat.framing import FrameError
 from p2pchat.packet import PacketError, PacketType, new_message_id
 from p2pchat.peer import ConnType, HandshakeError, Peer, Role
 from p2pchat.seen_cache import SeenCache
+from p2pchat.transfer import FileService
 
 log = logging.getLogger(__name__)
 
@@ -36,12 +38,18 @@ def new_node_id() -> bytes:
 
 class Node:
     def __init__(self, node_id, handshake_key, message_key, nickname, on_chat,
-                 host="0.0.0.0", port=config.MESH_PORT, room_id=None, discovery_port=None):
+                 host="0.0.0.0", port=config.MESH_PORT, room_id=None, discovery_port=None,
+                 file_port=None, download_dir=None, advertise_host=None, on_file=None):
         """on_chat(sender_id, nickname, text) is called, from a receiver thread,
         for every new chat message from another node.
 
         Discovery is on only if both room_id and discovery_port are given
-        (discovery_port=0 means "any free UDP port")."""
+        (discovery_port=0 means "any free UDP port").
+
+        File sharing is on only if file_port is given (0 = any free TCP port).
+        on_file(entry) is called when a new file is announced by another node.
+        advertise_host is the address we tell others to download from
+        (default: our address on the local network)."""
         self.node_id = node_id
         self.nickname = nickname
         self.port = port   # becomes the real port after start() (useful with port=0)
@@ -57,6 +65,11 @@ class Node:
         self._room_id = room_id
         self._discovery_port = discovery_port
         self._discovery = None
+        self._file_port = file_port
+        self._download_dir = download_dir if download_dir is not None else config.DOWNLOAD_DIR
+        self._advertise_host = advertise_host
+        self._on_file = on_file
+        self.files = None   # a FileService once started, if file sharing is on
 
     # --- starting and stopping -------------------------------------------------
 
@@ -80,6 +93,17 @@ class Node:
                 self._server.close()
                 raise
             self._discovery = discovery
+        if self._file_port is not None:
+            files = FileService(self.node_id, self._handshake_key, self._host, self._file_port,
+                                self._download_dir, self._advertise_host)
+            try:
+                files.start()
+            except OSError:
+                if self._discovery is not None:
+                    self._discovery.stop()
+                self._server.close()
+                raise
+            self.files = files
         self._running = True
         threading.Thread(target=self._accept_loop, daemon=True).start()
 
@@ -87,6 +111,8 @@ class Node:
         self._running = False
         if self._discovery is not None:
             self._discovery.stop()
+        if self.files is not None:
+            self.files.stop()
         if self._server is not None:
             try:
                 self._server.shutdown(socket.SHUT_RDWR)   # wakes up accept()
@@ -245,7 +271,7 @@ class Node:
         # Order matters (BR2): authenticate first, then mark as seen. Marking a
         # packet seen before it is verified would let a forged packet with a
         # copied ID block the real one.
-        if packet.type != PacketType.CHAT:
+        if packet.type not in (PacketType.CHAT, PacketType.FILE_ANNOUNCE):
             log.debug("ignoring packet type %s", packet.type)
             return
         try:
@@ -255,16 +281,42 @@ class Node:
             return
         if not self._seen.add(packet.message_id):   # check and insert in one step
             return   # we have already handled this one
+        if packet.type == PacketType.CHAT:
+            valid = self._handle_chat(packet, plaintext)
+        else:
+            valid = self._handle_announce(packet, plaintext)
+        if valid:
+            self._forward(packet, came_from=peer)
+
+    def _handle_chat(self, packet, plaintext: bytes) -> bool:
+        """Show a chat message. Returns False if it was bad (it is then not forwarded)."""
         try:
             nickname, text = decode_chat(plaintext)
         except ChatError as error:
             log.warning("dropping bad chat message: %s", error)
-            return
+            return False
         try:
             self._on_chat(packet.sender_id, nickname, text)
         except Exception:   # a bug in the callback must not kill the receiver thread
             log.exception("on_chat callback failed")
-        self._forward(packet, came_from=peer)
+        return True
+
+    def _handle_announce(self, packet, plaintext: bytes) -> bool:
+        """Record an announced file. Returns False if it was bad (it is then not forwarded)."""
+        try:
+            entry = decode_announce(plaintext)
+        except FileError as error:
+            log.warning("dropping bad file announcement: %s", error)
+            return False
+        if entry.uploader_id != packet.sender_id:   # only the uploader may announce its file
+            log.warning("dropping announcement made on behalf of another node")
+            return False
+        if self.files is not None and self.files.table.add(entry) and self._on_file is not None:
+            try:
+                self._on_file(entry)
+            except Exception:
+                log.exception("on_file callback failed")
+        return True   # nodes without file sharing still relay announcements
 
     def _forward(self, packet, came_from: Peer) -> None:
         onward = packet.forwarded()   # None when TTL is used up
@@ -302,3 +354,26 @@ class Node:
         for peer in peers:
             self._send_quietly(peer, packet)
         return len(peers)
+
+    def share_file(self, path) -> tuple:
+        """Hash a file, serve it, and tell the room about it.
+
+        Returns (FileEntry, number of peers told). Raises FileError if the file is
+        not acceptable, RuntimeError if file sharing is off.
+        """
+        if self.files is None:
+            raise RuntimeError("file sharing is off")
+        entry = self.files.share(path)
+        packet = encrypt_packet(
+            self._message_key,
+            packet_type=PacketType.FILE_ANNOUNCE,
+            ttl=config.INITIAL_TTL,
+            message_id=new_message_id(),
+            sender_id=self.node_id,
+            plaintext=encode_announce(entry),
+        )
+        self._seen.add(packet.message_id)
+        peers = self._peer_list()
+        for peer in peers:
+            self._send_quietly(peer, packet)
+        return entry, len(peers)

@@ -115,6 +115,10 @@ class Peer:
 
     # --- sending and receiving --------------------------------------------------
 
+    def set_timeout(self, seconds) -> None:
+        """How long send/recv may wait before raising TimeoutError (None = forever)."""
+        self._sock.settimeout(seconds)
+
     def send(self, data: bytes) -> None:
         """Send one raw frame. Safe to call from several threads."""
         with self._send_lock:
